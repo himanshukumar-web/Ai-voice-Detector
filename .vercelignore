@@ -1,0 +1,8 @@
+Backend_app/
+.venv/
+__pycache__/
+*.pyc
+.git/
+node_modules/
+render.yaml
+requirements.txt
