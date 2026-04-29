@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+librosa
+soundfile
+scikit-learn
+gTTS
+python-dotenv
