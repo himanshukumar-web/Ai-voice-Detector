@@ -1,3 +1,4 @@
+# Vercel Ignore
 Backend_app/
 .venv/
 __pycache__/
