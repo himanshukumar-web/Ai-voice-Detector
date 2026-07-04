@@ -93,20 +93,27 @@ def preprocess_audio(y: np.ndarray, sr: int) -> tuple:
 def extract_features(y: np.ndarray, sr: int) -> dict:
     """
     Extract comprehensive + AI-discriminative features.
-    Uses fast YIN pitch detector. All feature ranges verified against real audio.
+    Uses fast YIN pitch detector.
+    Returns:
+      - named: dict of all features (including absolute features for API/frontend display)
+      - vector: 1D numpy array of 80 robust, channel-invariant features for ML model
     """
     features = {}
     hop_length = 256
     n_fft = 2048
 
-    # ── MFCCs (13) + Delta + Delta-Delta ────────────────────────────────
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
-    mfcc_delta = librosa.feature.delta(mfcc)
-    mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
+    # 1. MFCCs (13) + Cepstral Mean Normalization (CMN) for robust classification
+    mfcc_raw = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=n_fft, hop_length=hop_length)
+    # Cepstral Mean Normalization to eliminate channel / recording device effects
+    mfcc_norm = mfcc_raw - np.mean(mfcc_raw, axis=1, keepdims=True)
 
+    mfcc_delta = librosa.feature.delta(mfcc_norm)
+    mfcc_delta2 = librosa.feature.delta(mfcc_norm, order=2)
+
+    # Populate named dictionary with absolute/raw values for frontend backwards compatibility
     for i in range(13):
-        features[f"mfcc_{i+1}_mean"] = float(np.mean(mfcc[i]))
-        features[f"mfcc_{i+1}_std"] = float(np.std(mfcc[i]))
+        features[f"mfcc_{i+1}_mean"] = float(np.mean(mfcc_raw[i]))
+        features[f"mfcc_{i+1}_std"] = float(np.std(mfcc_raw[i]))
     for i in range(13):
         features[f"mfcc_delta_{i+1}_mean"] = float(np.mean(mfcc_delta[i]))
         features[f"mfcc_delta_{i+1}_std"] = float(np.std(mfcc_delta[i]))
@@ -114,11 +121,11 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
         features[f"mfcc_delta2_{i+1}_mean"] = float(np.mean(mfcc_delta2[i]))
         features[f"mfcc_delta2_{i+1}_std"] = float(np.std(mfcc_delta2[i]))
 
-    # MFCC temporal change: frame-to-frame difference (AI = smooth = low value)
-    mfcc_frame_diff = float(np.mean(np.abs(np.diff(mfcc, axis=1))))
+    # MFCC temporal change
+    mfcc_frame_diff = float(np.mean(np.abs(np.diff(mfcc_norm, axis=1))))
     features["mfcc_temporal_change"] = mfcc_frame_diff
 
-    # ── Spectral Features ───────────────────────────────────────────────
+    # 2. Spectral Features
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
     features["spectral_centroid_mean"] = float(np.mean(centroid))
     features["spectral_centroid_std"] = float(np.std(centroid))
@@ -139,18 +146,17 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
     for i in range(contrast.shape[0]):
         features[f"spectral_contrast_{i+1}_mean"] = float(np.mean(contrast[i]))
 
-    # Spectral Flux: how fast spectrum changes frame-to-frame (Normalized)
+    # Spectral Flux (Normalized)
     stft = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
     stft_norm = stft / (np.sum(stft, axis=0, keepdims=True) + 1e-10)
     flux = np.sqrt(np.mean(np.diff(stft_norm, axis=1) ** 2, axis=0))
     features["spectral_flux_mean"] = float(np.mean(flux)) * 100.0
     features["spectral_flux_std"] = float(np.std(flux)) * 100.0
 
-    # Spectral Crest Factor: ratio of peak to average spectral energy (Normalized)
+    # Spectral Crest Factor
     features["spectral_crest_factor"] = float(np.mean(np.max(stft, axis=0) / (np.mean(stft, axis=0) + 1e-10)))
 
-    # Harmonic-to-Percussive ratio
-    # AI TTS = very high harmonic ratio (>0.90); Human = mixed (~0.40-0.75)
+    # HPSS
     harmonic, percussive = librosa.effects.hpss(y)
     h_energy = float(np.mean(harmonic ** 2))
     p_energy = float(np.mean(percussive ** 2))
@@ -158,19 +164,18 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
     features["harmonic_ratio"] = float(h_energy / total_energy)
     features["percussive_ratio"] = float(p_energy / total_energy)
 
-    # ── ZCR ──────────────────────────────────────────────────────────────
+    # ZCR
     zcr = librosa.feature.zero_crossing_rate(y, hop_length=hop_length)[0]
     features["zcr_mean"] = float(np.mean(zcr))
     features["zcr_std"] = float(np.std(zcr))
 
-    # ── RMS Energy + Coefficient of Variation (AI = very LOW CV) ──────────
-    # Actual ranges: TTS rms_cv ~0.03-0.10, Human rms_cv ~0.50-1.5
+    # RMS Energy
     rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop_length)[0]
     features["rms_mean"] = float(np.mean(rms))
     features["rms_std"] = float(np.std(rms))
     features["rms_cv"] = float(np.std(rms) / (np.mean(rms) + 1e-10))
 
-    # ── Pitch (F0) via YIN ───────────────────────────────────────────────
+    # Pitch (F0)
     try:
         f0_raw = librosa.yin(
             y,
@@ -180,9 +185,8 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
             hop_length=hop_length,
             frame_length=n_fft,
         )
-        # YIN returns fmax for unvoiced frames, filter those
         f0 = f0_raw[f0_raw < librosa.note_to_hz('C6') * 0.99]
-        f0 = f0[f0 > 60.0]  # min realistic human pitch
+        f0 = f0[f0 > 60.0]
         voiced_mask = (f0_raw > 60.0) & (f0_raw < librosa.note_to_hz('C6') * 0.99)
         voiced_frames = int(np.sum(voiced_mask))
         total_frames = max(len(f0_raw), 1)
@@ -191,14 +195,16 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
         voiced_frames = 0
         total_frames = 1
 
+    pitch_jitter_val = 0.0
+    pitch_entropy_val = 0.0
+
     if len(f0) > 5:
         features["pitch_mean"] = float(np.mean(f0))
         features["pitch_std"] = float(np.std(f0))
         features["pitch_range"] = float(np.max(f0) - np.min(f0))
         features["pitch_median"] = float(np.median(f0))
 
-        # Pitch jitter = relative frame-to-frame variation (octave jump filtered)
-        # AI = low jitter, Human = higher
+        # Pitch jitter
         cleaned_f0 = []
         for val in f0:
             if not cleaned_f0:
@@ -211,17 +217,18 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
         cleaned_f0 = np.array(cleaned_f0)
 
         if len(cleaned_f0) > 1:
-            diffs = np.abs(np.diff(cleaned_f0))
-            features["pitch_jitter"] = float(np.mean(diffs) / np.mean(cleaned_f0))
+            pitch_jitter_val = float(np.mean(np.abs(np.diff(cleaned_f0))) / np.mean(cleaned_f0))
+            features["pitch_jitter"] = pitch_jitter_val
         else:
             features["pitch_jitter"] = 0.0
 
-        # Pitch entropy computed correctly using count histogram over cleaned pitch
+        # Pitch entropy
         if len(cleaned_f0) > 5:
             hist_counts, _ = np.histogram(cleaned_f0, bins=20)
-            hist_counts = hist_counts.astype(float) + 1e-10  # avoid log(0)
+            hist_counts = hist_counts.astype(float) + 1e-10
             hist_prob = hist_counts / hist_counts.sum()
-            features["pitch_entropy"] = float(-np.sum(hist_prob * np.log2(hist_prob)))
+            pitch_entropy_val = float(-np.sum(hist_prob * np.log2(hist_prob)))
+            features["pitch_entropy"] = pitch_entropy_val
         else:
             features["pitch_entropy"] = 0.0
     else:
@@ -234,7 +241,7 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
 
     features["voiced_ratio"] = float(voiced_frames / total_frames)
 
-    # ── Temporal Features ───────────────────────────────────────────────
+    # Temporal Features
     silence_threshold = 0.01
     features["silence_ratio"] = float(np.sum(rms < silence_threshold) / max(len(rms), 1))
     features["duration_seconds"] = float(len(y) / sr)
@@ -243,13 +250,41 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
     tempo = librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
     features["tempo"] = float(tempo[0]) if len(tempo) > 0 else 0.0
 
-    # ── Build flat feature vector ────────────────────────────────────────
-    feature_vector = np.array(list(features.values()), dtype=np.float32)
+    # 3. Construct clean, scaled, normalized, channel-invariant 80-dimensional feature vector for ML training & inference
+    robust_features = {}
+    
+    # MFCC std, delta mean/std, delta2 mean/std (all based on mfcc_norm)
+    for i in range(13):
+        robust_features[f"mfcc_{i+1}_std"] = float(np.std(mfcc_norm[i]))
+        robust_features[f"mfcc_delta_{i+1}_mean"] = float(np.mean(mfcc_delta[i]))
+        robust_features[f"mfcc_delta_{i+1}_std"] = float(np.std(mfcc_delta[i]))
+        robust_features[f"mfcc_delta2_{i+1}_mean"] = float(np.mean(mfcc_delta2[i]))
+        robust_features[f"mfcc_delta2_{i+1}_std"] = float(np.std(mfcc_delta2[i]))
+        
+    robust_features["mfcc_temporal_change"] = mfcc_frame_diff
+    robust_features["spectral_centroid_std"] = float(np.std(centroid))
+    robust_features["spectral_bandwidth_std"] = float(np.std(bandwidth))
+    robust_features["spectral_flatness_mean"] = float(np.mean(flatness))
+    robust_features["spectral_flatness_std"] = float(np.std(flatness))
+    robust_features["spectral_flux_mean"] = float(np.mean(flux)) * 100.0
+    robust_features["spectral_flux_std"] = float(np.std(flux)) * 100.0
+    robust_features["spectral_crest_factor"] = features["spectral_crest_factor"]
+    robust_features["harmonic_ratio"] = features["harmonic_ratio"]
+    robust_features["percussive_ratio"] = features["percussive_ratio"]
+    robust_features["zcr_std"] = features["zcr_std"]
+    robust_features["rms_cv"] = features["rms_cv"]
+    robust_features["pitch_cv"] = float(np.std(f0) / np.mean(f0)) if len(f0) > 5 else 0.0
+    robust_features["pitch_jitter"] = pitch_jitter_val
+    robust_features["pitch_entropy"] = pitch_entropy_val
+    robust_features["voiced_ratio"] = features["voiced_ratio"]
+    robust_features["silence_ratio"] = features["silence_ratio"]
+
+    vector = np.array(list(robust_features.values()), dtype=np.float32)
 
     return {
         "named": features,
-        "vector": feature_vector,
-        "feature_names": list(features.keys()),
+        "vector": vector,
+        "feature_names": list(robust_features.keys()),
     }
 
 

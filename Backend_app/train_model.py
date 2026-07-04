@@ -31,6 +31,54 @@ def get_segments(y, sr, segment_len_sec=10):
         start += segment_samples
     return segments
 
+def augment_audio(y: np.ndarray, sr: int) -> list:
+    """
+    Generate augmented versions of audio signal:
+      1. Original
+      2. Add light white noise (25dB SNR)
+      3. Add heavy white noise (12dB SNR)
+      4. Pitch shift (+1.5 semitones)
+      5. Pitch shift (-1.5 semitones)
+      6. Volume scaling (50% amplitude)
+      7. Low-pass filter (moving average of window size 3 to simulate phone line)
+    """
+    augmented = [y]
+    
+    # 2. Add light noise
+    rms_y = np.sqrt(np.mean(y**2))
+    if rms_y > 0:
+        noise_std_light = rms_y / (10 ** (25 / 20)) # 25dB SNR
+        noise_light = np.random.normal(0, noise_std_light, len(y))
+        augmented.append(y + noise_light)
+        
+        # 3. Add heavy noise
+        noise_std_heavy = rms_y / (10 ** (12 / 20)) # 12dB SNR
+        noise_heavy = np.random.normal(0, noise_std_heavy, len(y))
+        augmented.append(y + noise_heavy)
+    
+    # 4. Pitch shift up
+    try:
+        y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=1.5)
+        augmented.append(y_pitch_up)
+    except Exception:
+        pass
+        
+    # 5. Pitch shift down
+    try:
+        y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-1.5)
+        augmented.append(y_pitch_down)
+    except Exception:
+        pass
+        
+    # 6. Volume scale
+    augmented.append(y * 0.5)
+    
+    # 7. Low-pass filter (simple moving average to simulate low pass)
+    y_lpf = np.convolve(y, np.ones(3)/3, mode='same')
+    augmented.append(y_lpf)
+    
+    return augmented
+
 def main():
     X = []
     y_labels = []
@@ -45,10 +93,12 @@ def main():
             segs = get_segments(y_trimmed, 16000, 10)
             print(f"  {libri}: found {len(segs)} segments")
             for seg in segs:
-                y_pre, _, _ = preprocess_audio(seg, 16000)
-                feat = extract_features(y_pre, 16000)["vector"]
-                X.append(feat)
-                y_labels.append("HUMAN_GENERATED")
+                _, y_clean, _ = preprocess_audio(seg, 16000)
+                for aug in augment_audio(y_clean, 16000):
+                    aug_pre = np.append(aug[0], aug[1:] - 0.93 * aug[:-1])
+                    feat = extract_features(aug_pre, 16000)["vector"]
+                    X.append(feat)
+                    y_labels.append("HUMAN_GENERATED")
         except Exception as e:
             print(f"  Error processing {libri}: {e}")
 
@@ -61,10 +111,12 @@ def main():
         segs = get_segments(y_trimmed, 16000, 10)
         print(f"  {os.path.basename(fp_human)}: found {len(segs)} segments")
         for seg in segs:
-            y_pre, _, _ = preprocess_audio(seg, 16000)
-            feat = extract_features(y_pre, 16000)["vector"]
-            X.append(feat)
-            y_labels.append("HUMAN_GENERATED")
+            _, y_clean, _ = preprocess_audio(seg, 16000)
+            for aug in augment_audio(y_clean, 16000):
+                aug_pre = np.append(aug[0], aug[1:] - 0.93 * aug[:-1])
+                feat = extract_features(aug_pre, 16000)["vector"]
+                X.append(feat)
+                y_labels.append("HUMAN_GENERATED")
 
     # 3. User WhatsApp AI (22s clip)
     print("\nExtracting user WhatsApp AI speech features (22s clip)...")
@@ -75,10 +127,12 @@ def main():
         segs = get_segments(y_trimmed, 16000, 10)
         print(f"  {os.path.basename(fp_ai)}: found {len(segs)} segments")
         for seg in segs:
-            y_pre, _, _ = preprocess_audio(seg, 16000)
-            feat = extract_features(y_pre, 16000)["vector"]
-            X.append(feat)
-            y_labels.append("AI_GENERATED")
+            _, y_clean, _ = preprocess_audio(seg, 16000)
+            for aug in augment_audio(y_clean, 16000):
+                aug_pre = np.append(aug[0], aug[1:] - 0.93 * aug[:-1])
+                feat = extract_features(aug_pre, 16000)["vector"]
+                X.append(feat)
+                y_labels.append("AI_GENERATED")
 
     # 4. AI (gTTS)
     print("\nGenerating and extracting gTTS AI speech features...")
@@ -102,10 +156,12 @@ def main():
                 if not segs and len(y_trimmed) > 16000 * 2:
                      segs = [y_trimmed]
                 for seg in segs:
-                    y_pre, _, _ = preprocess_audio(seg, 16000)
-                    feat = extract_features(y_pre, 16000)["vector"]
-                    X.append(feat)
-                    y_labels.append("AI_GENERATED")
+                    _, y_clean, _ = preprocess_audio(seg, 16000)
+                    for aug in augment_audio(y_clean, 16000):
+                        aug_pre = np.append(aug[0], aug[1:] - 0.93 * aug[:-1])
+                        feat = extract_features(aug_pre, 16000)["vector"]
+                        X.append(feat)
+                        y_labels.append("AI_GENERATED")
                 os.remove(fn)
         except Exception as e:
              print(f"  Error generating gTTS {idx}: {e}")
@@ -113,7 +169,7 @@ def main():
     X = np.array(X)
     y_labels = np.array(y_labels)
 
-    print(f"\nDataset summary:")
+    print(f"\nDataset summary with Augmentation:")
     print(f"  Total samples: {len(X)}")
     print(f"  Human samples: {np.sum(y_labels == 'HUMAN_GENERATED')}")
     print(f"  AI samples   : {np.sum(y_labels == 'AI_GENERATED')}")
